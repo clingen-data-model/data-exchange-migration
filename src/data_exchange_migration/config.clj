@@ -3,9 +3,10 @@
            [org.apache.kafka.clients.consumer KafkaConsumer Consumer ConsumerRecord]))
 
 (def consumer-client-properties
-  {"bootstrap.servers" (System/getenv "DX_MIGRATION_SOURCE_EXCHANGE_HOST")
+  {"bootstrap.servers" (System/getenv "DX_MIGRATION_SOURCE_HOST")
    "group.id" (System/getenv "DX_MIGRATION_GROUP")
    "enable.auto.commit" "true"
+   "compression.type" "gzip"
    "auto.commit.interval.ms" "1000"
    "key.deserializer" "org.apache.kafka.common.serialization.StringDeserializer"
    "value.deserializer" "org.apache.kafka.common.serialization.StringDeserializer"
@@ -25,7 +26,7 @@
    "sasl.mechanism"                        "PLAIN"
    "request.timeout.ms"                    "20000"
    "application.id"                        "clinvar-submissions-local"
-   "bootstrap.servers"                     (System/getenv "DX_MIGRATION_DESTINATION_EXCHANGE_HOST")
+   "bootstrap.servers"                     (System/getenv "DX_MIGRATION_DESTINATION_HOST")
    "retry.backoff.ms"                      "500"
    "security.protocol"                     "SASL_SSL"
    "key.serializer"                        "org.apache.kafka.common.serialization.StringSerializer"
