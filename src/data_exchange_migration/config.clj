@@ -25,7 +25,7 @@
    "compression.type"                      "gzip"
    "sasl.mechanism"                        "PLAIN"
    "request.timeout.ms"                    "20000"
-   "application.id"                        "clinvar-submissions-local"
+   "application.id"                        (System/getenv "DX_MIGRATION_GROUP")
    "bootstrap.servers"                     (System/getenv "DX_MIGRATION_DESTINATION_HOST")
    "retry.backoff.ms"                      "500"
    "security.protocol"                     "SASL_SSL"
