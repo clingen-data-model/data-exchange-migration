@@ -1,20 +1,21 @@
 (ns data-exchange-migration.core
   (:require [data-exchange-migration.config :as cfg]
+            [data-exchange-migration.util :as util]
             [jackdaw.client :as jc]
+            [jackdaw.admin :as ja]
             [jackdaw.data :as jd]
             [clojure.java.io :as io]
-            [taoensso.timbre :as timbre
-             :refer [log trace debug info warn error fatal report
-                     logf tracef debugf infof warnf errorf fatalf reportf
-                     spy get-env]]
+            [taoensso.timbre :as log]
             [clojure.string :as s])
   (:import [org.apache.kafka.common TopicPartition PartitionInfo]
            [org.apache.kafka.clients.consumer ConsumerRecord]
            [java.lang Thread]
-           [java.time Duration])
+           [java.time Duration]
+           (org.apache.kafka.clients.admin AdminClient)
+           (java.util Properties))
   (:gen-class))
 
-(timbre/set-level! :debug)
+(log/set-level! :debug)
 (def consumer-poll-timeout 250)
 
 (defn reset-topic-offset
@@ -23,14 +24,15 @@
   ; Doesn't always work
   (with-open [consumer (jc/consumer consumer-config)]
     (doseq [partition-info (.partitionsFor consumer topic-name)]
-      (info "resetting partition" partition-info)
+      (log/info "resetting partition" partition-info)
       (jc/subscribe consumer [{:topic-name topic-name}])
+      (jc/poll consumer 0)
       (jc/seek-to-beginning-eager consumer [(TopicPartition. topic-name (.partition partition-info))]))))
 
 (defn reset-consumer-offset
   "Resets the consumer offset to the beginning of the topic. Is stateful on the consumer, but also returns the consumer."
   [consumer]
-  (info "Resetting consumer to beginning of all topics")
+  (log/info "Resetting consumer to beginning of all topics")
   (jc/seek-to-beginning-eager consumer)
   consumer)
 
@@ -53,7 +55,7 @@
 ;                   0)))
 ;      )))
 
-(def reset-input-offsets true)
+(def do-reset-input-offsets (util/to-bool (util/get-env-required "DX_MIGRATION_RESET_OFFSET")))
 
 ;(defn create-pipe
 ;  ""
@@ -86,23 +88,24 @@
     ; Subscribe to keys (consumer topics) from topic map (consumer-topic -> producer-topic)
     ; key keywords must be converted to string (name)
     (let [consumer-topics (for [[k v] topic-map] {:topic-name (name k)})]
-      (debug "Subscribing to consumer topics " (s/join "," consumer-topics))
+      (log/debug "Subscribing to consumer topics " (s/join "," consumer-topics))
       (jc/subscribe consumer consumer-topics))
 
-    (if reset-input-offsets
+    (if do-reset-input-offsets
       (reset-consumer-offset consumer))
+    (log/info "Starting to poll")
     (while true
       (let [msgs (jc/poll consumer (Duration/ofMillis consumer-poll-timeout))]
         (if (< 0 (count msgs))
           (do
-            (infof "Sending %d messages to producer" (count msgs))
+            (log/infof "Sending %d messages to producer" (count msgs))
             (doseq [msg msgs]
               ; msg is a datified ConsumerRecord, but .topic is :topic-name
               (let [consumer-topic (:topic-name msg)
                     producer-topic ((keyword (:topic-name msg)) topic-map)
                     key (:key msg)
                     value (:value msg)]
-                (debugf "sending message (key=%s) from %s to %s" key consumer-topic producer-topic)
+                (log/debugf "sending message (key=%s) from %s to %s" key consumer-topic producer-topic)
                 ; Reproduce the message using the same key as in the consumer topic
                 ; timestamp and partition are not copied, and partitioning of the stream is not mirrored
                 ; https://github.com/FundingCircle/jackdaw/blob/daa838757a90e54d57165e29ff3c65824730e4f5/src/jackdaw/data/producer.clj#L15
@@ -113,10 +116,10 @@
           )))
     ))
 
-(defn write-cfg-to-file
-  [kafka-config filename]
+(defn write-map-to-file
+  [m filename]
   (with-open [writer (io/writer filename)]
-    (doseq [[k v] kafka-config]
+    (doseq [[k v] m]
       (.write writer (str k "=" v "\n")))))
 
 (def topics ["gene_dosage"
@@ -136,16 +139,40 @@
 ;             "variant_path_interp"
              ])
 
+; TODO complete topic-config
+; This is handy so that a series of topics don't need to be created via the UI or cli.
+; And resetting a topic can be done via the UI, and this can automatically re-create it.
+; The difficulty is in providing a complete and desirable topic config.
+; To start out this should just be copied directly from an auto-filled topic config from confluent UI.
+(defn create-output-topic-if-not-exists
+  "Creates a topic on the destination cluster if it doesn't exist.
+  Requires producer config to have admin authorization."
+  [topic-name]
+  (let [admin-client-props (Properties.)]
+    (doseq [[k v] cfg/producer-client-properties]
+      (.put admin-client-props (str k) (str v)))
+    (let [admin-client (AdminClient/create admin-client-props)]
+      (if (not (ja/topic-exists? admin-client {:topic-name topic-name}))
+        ; create-topics mapping for NewTopic
+        ; https://github.com/FundingCircle/jackdaw/blob/04f654f54489b2c9bcf0984fa613fff925c549e5/src/jackdaw/data/admin.clj#L54
+        (.createTopics admin-client [{:topic-name topic-name
+                                      :partition-count 1
+                                      :replication-factor 1
+                                      ; https://docs.confluent.io/current/installation/configuration/topic-configs.html
+                                      :topic-config {"cleanup.policy"   "delete"
+                                                     "compression.type" "gzip"
+                                                     "retention-ms"     -1
+                                                     ; TODO
+                                                     }}])
+        (log/infof "Topic %s already exists" topic-name)))))
 
 (defn -main [& args]
-  (write-cfg-to-file cfg/consumer-client-properties "kafka-consumer.properties")
-  (write-cfg-to-file cfg/producer-client-properties "kafka-producer.properties")
+  (write-map-to-file cfg/consumer-client-properties "kafka-consumer.properties")
+  (write-map-to-file cfg/producer-client-properties "kafka-producer.properties")
 
-  (doseq [topic-name topics]
-    ; Create a thread per topic. Could subscribe to all topics from one consumer and map to output topics
-    ; based on the message metadata
-    (let [topic-map (into {} (for [t topics] [(keyword t) t]))]
-      (create-pipe {:consumer-config cfg/consumer-client-properties
-                    :producer-config cfg/producer-client-properties
-                    :topic-map topic-map}))
-    ))
+  ; Construct topic map {:<source-topic> "<dest-topic>"
+  ;                      ...}
+  (let [topic-map (into {} (for [t topics] [(keyword t) t]))]
+    (create-pipe {:consumer-config cfg/consumer-client-properties
+                  :producer-config cfg/producer-client-properties
+                  :topic-map topic-map})))
