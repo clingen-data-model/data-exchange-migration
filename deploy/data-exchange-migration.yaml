@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-exchange-migration
+  labels:
+    app: data-exchange-migration
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-exchange-migration
+  template:
+    metadata:
+      labels:
+        app: data-exchange-migration
+    spec:
+      containers:
+        - image: 'gcr.io/clingen-dx/data-exchange-migration:0.1'
+          imagePullPolicy: Always
+          name: data-exchange-migration
+          env:
+            - name: DX_MIGRATION_SOURCE_HOST
+              value: 'exchange.clinicalgenome.org:9093'
+            - name: DX_MIGRATION_DESTINATION_HOST
+              value: 'pkc-4yyd6.us-east1.gcp.confluent.cloud:9092'
+            - name: DX_MIGRATION_GROUP
+              value: dx_migration
+            - name: DX_MIGRATION_RESET_OFFSET
+              value: 'false'
+            - name: DX_MIGRATION_TRUSTSTORE
+              value: /app/kafka.client.truststore.jks
+            - name: DX_MIGRATION_TRUSTSTORE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: dx-migration-credentials
+                  key: truststore_pass
+            - name: DX_MIGRATION_KEYSTORE
+              value: /app/dx_migration.client.keystore.jks
+            - name: DX_MIGRATION_KEYSTORE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: dx-migration-credentials
+                  key: keystore_pass
+            - name: DX_MIGRATION_KEY_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: dx-migration-credentials
+                  key: key_pass
+            - name: DX_MIGRATION_DESTINATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: dx-migration-credentials
+                  key: destination_user
+            - name: DX_MIGRATION_DESTINATION_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: dx-migration-credentials
+                  key: destination_pass
